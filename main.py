@@ -32,7 +32,6 @@ app.add_middleware(
 )
 
 # ------------------ CLOUDFLARE IP PROTECTION ------------------
-# IMPORTANT: This list must be kept up to date from cloudflare.com/ips
 CLOUDFLARE_IPS = [
     # IPv4 addresses
     "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
@@ -57,33 +56,42 @@ def is_cloudflare_ip(ip: str) -> bool:
 @app.middleware("http")
 async def cloudflare_protection_middleware(request: Request, call_next):
     client_host = None
+
     # Get IP from standard headers first
     x_forwarded_for = request.headers.get("X-Forwarded-For")
     if x_forwarded_for:
         client_host = x_forwarded_for.split(",")[0].strip()
-    
+
     # Fallback to the CF-Connecting-IP header
     if not client_host:
         cf_connecting_ip = request.headers.get("CF-Connecting-IP")
         if cf_connecting_ip:
-            client_host = cf_connecting_ip
-            
-    # Final fallback to standard client host
-    if not client_host:
-        if request.client and request.client.host:
-            client_host = request.client.host
+            client_host = cf_connecting_ip.strip()
 
+    # Final fallback to standard client host
+    if not client_host and request.client and request.client.host:
+        client_host = request.client.host
+
+    # Block if not Cloudflare IP
     if client_host and not is_cloudflare_ip(client_host):
-        raise HTTPException(status_code=403, detail="Forbidden: Access is restricted.")
-    
-    # If no IP was found, or it was not a Cloudflare IP, we assume it's a direct connection and block it.
+        logger.warning(f"Blocked request from non-Cloudflare IP: {client_host}")
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"Forbidden: Access is restricted for IP {client_host}"}
+        )
+
+    # If no IP found at all
     if not client_host:
-         raise HTTPException(status_code=403, detail="Forbidden: No client IP found.")
+        logger.warning("Blocked request with no client IP detected.")
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Forbidden: No client IP found."}
+        )
 
     response = await call_next(request)
     return response
 
-# Health check root route
+# ------------------ HEALTH CHECK ------------------
 @app.get("/")
 def health():
     return {"message": "Backend running ✅", "status": "healthy"}
@@ -111,10 +119,6 @@ def cleanup_expired_sessions():
 # ------------------ CAPTCHA ROUTE ------------------
 @app.get("/get-captcha")
 def get_captcha():
-    """
-    Establishes a session, triggers a CAPTCHA, and returns the
-    image along with a session ID for the client to use in subsequent requests.
-    """
     cleanup_expired_sessions()
     try:
         session = requests.Session()
@@ -139,7 +143,7 @@ def get_captcha():
         res_post.raise_for_status()
         soup_post = BeautifulSoup(res_post.text, "html.parser")
 
-        # Step 3: Extract CAPTCHA URL from the new page content
+        # Step 3: Extract CAPTCHA URL
         captcha_img_tag = soup_post.find("img", src=lambda x: x and "r=site%2Fcaptcha" in x)
         if not captcha_img_tag:
             raise HTTPException(status_code=500, detail="CAPTCHA image not found after trigger.")
@@ -170,7 +174,7 @@ def get_captcha():
         logger.error(f"Unexpected error in get_captcha: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ------------------ LOGIN + FETCH TIMETABLE (Original Endpoint) ------------------
+# ------------------ LOGIN + FETCH TIMETABLE ------------------
 @app.post("/fetch-timetable")
 def fetch_timetable(
     username: str = Form(...),
@@ -235,7 +239,7 @@ def fetch_timetable(
         if session_id in captcha_sessions:
             del captcha_sessions[session_id]
 
-# ------------------ NEW: FETCH ATTENDANCE ROUTE ------------------
+# ------------------ FETCH ATTENDANCE ------------------
 @app.post("/fetch-attendance")
 def fetch_attendance(
     username: str = Form(...),
@@ -243,7 +247,7 @@ def fetch_attendance(
     captcha: str = Form(...),
     session_id: str = Form(...),
     academic_year_code: str = Form(...),
-    semester_id: str = Form(...)
+    semester_id: str = Form(...),
 ):
     if session_id not in captcha_sessions:
         raise HTTPException(status_code=400, detail="Invalid or expired session. Please refresh and try again.")
@@ -256,7 +260,6 @@ def fetch_attendance(
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        # Step 1: Login
         login_payload = {
             "_csrf": csrf,
             "LoginForm[username]": username,
@@ -271,7 +274,6 @@ def fetch_attendance(
 
         logger.info(f"Login successful for user: {username}")
 
-        # Step 2: Fetch Attendance Data
         attendance_url = f"{base_url}/index.php?r=studentattendance%2Fstudentdailyattendance%2Fcourselist"
         post_login_soup = BeautifulSoup(login_response.text, "html.parser")
         post_login_csrf_meta = post_login_soup.find("meta", {"name": "csrf-token"})
@@ -287,7 +289,6 @@ def fetch_attendance(
         attendance_response = session.post(attendance_url, data=attendance_payload, headers=headers, timeout=30)
         attendance_response.raise_for_status()
         
-        # Step 3: Parse the Attendance HTML
         attendance_soup = BeautifulSoup(attendance_response.text, "html.parser")
         container = attendance_soup.find("div", class_="grid-view")
         if not container:
@@ -301,8 +302,8 @@ def fetch_attendance(
         attendance_data = []
         for row in table.find("tbody").find_all("tr"):
             cells = row.find_all("td")
-            if not cells: continue
-            
+            if not cells:
+                continue
             row_data = {table_headers[i]: cells[i].text.strip() for i in range(len(cells))}
             attendance_data.append(row_data)
 
