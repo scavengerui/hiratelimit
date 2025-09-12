@@ -8,7 +8,6 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
-import ipaddress
 
 # ------------------ LOGGING ------------------
 logging.basicConfig(level=logging.INFO)
@@ -30,60 +29,6 @@ app.add_middleware(
     expose_headers=["X-Session-ID"], # Expose the custom header
 )
 
-# ------------------ CLOUDFLARE IP PROTECTION ------------------
-CLOUDFLARE_IPS = [
-    # IPv4
-    "103.21.244.0/22","103.22.200.0/22","103.31.4.0/22","104.16.0.0/13",
-    "104.24.0.0/14","108.162.192.0/18","131.0.72.0/22","141.101.64.0/18",
-    "162.158.0.0/15","172.64.0.0/13","173.245.48.0/20","188.114.96.0/20",
-    "190.93.240.0/20","197.234.240.0/22","198.41.128.0/17",
-    # IPv6
-    "2400:cb00::/32","2606:4700::/32","2803:f800::/32","2405:b500::/32",
-    "2405:8100::/32","2a06:98c0::/29","2c0f:f248::/32"
-]
-
-def is_cloudflare_ip(ip: str) -> bool:
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        for ip_range in CLOUDFLARE_IPS:
-            if ip_obj in ipaddress.ip_network(ip_range):
-                return True
-    except (ValueError, TypeError):
-        return False
-    return False
-
-@app.middleware("http")
-async def cloudflare_protection_middleware(request: Request, call_next):
-    # ✅ Allow if the request uses your Cloudflare domain
-    host_header = request.headers.get("host", "").lower()
-    if host_header == "api.timetableklapi.me":
-        logger.info(f"Accepted request via Cloudflare domain: {host_header}")
-        return await call_next(request)
-
-    # Otherwise check IP ranges
-    client_host = request.headers.get("CF-Connecting-IP")
-    if not client_host:
-        x_forwarded_for = request.headers.get("X-Forwarded-For")
-        if x_forwarded_for:
-            client_host = x_forwarded_for.split(",")[0].strip()
-    if not client_host and request.client and request.client.host:
-        client_host = request.client.host
-
-    if client_host and not is_cloudflare_ip(client_host):
-        logger.warning(f"Blocked request from non-Cloudflare IP: {client_host}, Host: {host_header}")
-        return JSONResponse(
-            status_code=403,
-            content={"detail": f"Forbidden: Access is restricted for IP {client_host}"}
-        )
-    if not client_host:
-        logger.warning(f"Blocked request with no client IP detected. Host: {host_header}")
-        return JSONResponse(
-            status_code=403,
-            content={"detail": "Forbidden: No client IP found."}
-        )
-
-    return await call_next(request)
-
 # ------------------ HEALTH ------------------
 @app.get("/")
 def health():
@@ -99,8 +44,10 @@ def cleanup_expired_sessions():
         for session_id, data in captcha_sessions.items():
             if current_time - data["created_at"] > timedelta(minutes=10):
                 expired_sessions.append(session_id)
+        
         for session_id in expired_sessions:
             del captcha_sessions[session_id]
+        
         if expired_sessions:
             logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
     except Exception as e:
