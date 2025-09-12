@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from bs4 import BeautifulSoup
@@ -9,22 +9,11 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
-# --------- NEW IMPORTS FOR RATE LIMITING ----------
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TimeTable & Attendance Backend", version="3.0.0")
-
-# --------- SLOWAPI SETUP ----------
-# This will respect X-Forwarded-For automatically on Railway
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.on_event("startup")
 async def startup_event():
@@ -56,8 +45,10 @@ def cleanup_expired_sessions():
         for session_id, data in captcha_sessions.items():
             if current_time - data["created_at"] > timedelta(minutes=10):
                 expired_sessions.append(session_id)
+        
         for session_id in expired_sessions:
             del captcha_sessions[session_id]
+        
         if expired_sessions:
             logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
     except Exception as e:
@@ -65,8 +56,7 @@ def cleanup_expired_sessions():
 
 # ------------------ CAPTCHA ROUTE ------------------
 @app.get("/get-captcha")
-@limiter.limit("10/minute")  # 10 per IP per minute
-def get_captcha(request: Request):
+def get_captcha():
     """
     Establishes a session, triggers a CAPTCHA, and returns the
     image along with a session ID for the client to use in subsequent requests.
@@ -126,11 +116,9 @@ def get_captcha(request: Request):
         logger.error(f"Unexpected error in get_captcha: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ------------------ LOGIN + FETCH TIMETABLE ------------------
+# ------------------ LOGIN + FETCH TIMETABLE (Original Endpoint) ------------------
 @app.post("/fetch-timetable")
-@limiter.limit("7/minute")  # 7 per IP per minute
 def fetch_timetable(
-    request: Request,
     username: str = Form(...),
     password: str = Form(...),
     captcha: str = Form(...),
@@ -193,11 +181,9 @@ def fetch_timetable(
         if session_id in captcha_sessions:
             del captcha_sessions[session_id]
 
-# ------------------ FETCH ATTENDANCE ROUTE ------------------
+# ------------------ NEW: FETCH ATTENDANCE ROUTE ------------------
 @app.post("/fetch-attendance")
-@limiter.limit("7/minute")  # 7 per IP per minute
 def fetch_attendance(
-    request: Request,
     username: str = Form(...),
     password: str = Form(...),
     captcha: str = Form(...),
@@ -262,6 +248,7 @@ def fetch_attendance(
         for row in table.find("tbody").find_all("tr"):
             cells = row.find_all("td")
             if not cells: continue
+            
             row_data = {table_headers[i]: cells[i].text.strip() for i in range(len(cells))}
             attendance_data.append(row_data)
 
