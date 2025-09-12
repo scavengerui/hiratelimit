@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 import ipaddress
 from typing import List
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,15 +50,35 @@ def is_cloudflare_ip(ip: str) -> bool:
         for ip_range in CLOUDFLARE_IPS:
             if ip_obj in ipaddress.ip_network(ip_range):
                 return True
-    except ValueError:
+    except (ValueError, TypeError):
         return False
     return False
 
 @app.middleware("http")
 async def cloudflare_protection_middleware(request: Request, call_next):
-    client_host = request.client.host
-    if not is_cloudflare_ip(client_host):
+    client_host = None
+    # Get IP from standard headers first
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    if x_forwarded_for:
+        client_host = x_forwarded_for.split(",")[0].strip()
+    
+    # Fallback to the CF-Connecting-IP header
+    if not client_host:
+        cf_connecting_ip = request.headers.get("CF-Connecting-IP")
+        if cf_connecting_ip:
+            client_host = cf_connecting_ip
+            
+    # Final fallback to standard client host
+    if not client_host:
+        if request.client and request.client.host:
+            client_host = request.client.host
+
+    if client_host and not is_cloudflare_ip(client_host):
         raise HTTPException(status_code=403, detail="Forbidden: Access is restricted.")
+    
+    # If no IP was found, or it was not a Cloudflare IP, we assume it's a direct connection and block it.
+    if not client_host:
+         raise HTTPException(status_code=403, detail="Forbidden: No client IP found.")
 
     response = await call_next(request)
     return response
