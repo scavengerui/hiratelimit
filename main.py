@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from bs4 import BeautifulSoup
@@ -8,6 +8,8 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
+import ipaddress
+from typing import List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,11 +22,6 @@ async def startup_event():
     logger.info("✅ FastAPI app starting...")
     logger.info(f"Environment: PORT={os.getenv('PORT', '8000')}")
 
-# Health check root route
-@app.get("/")
-def health():
-    return {"message": "Backend running ✅", "status": "healthy"}
-
 # Allow API access from any frontend (e.g., Expo app)
 app.add_middleware(
     CORSMiddleware,
@@ -33,6 +30,43 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Session-ID"], # Expose the custom header
 )
+
+# ------------------ CLOUDFLARE IP PROTECTION ------------------
+# IMPORTANT: This list must be kept up to date from cloudflare.com/ips
+CLOUDFLARE_IPS = [
+    # IPv4 addresses
+    "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13", 
+    "104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18", 
+    "162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20", 
+    "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    # IPv6 addresses
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", 
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32"
+]
+
+def is_cloudflare_ip(ip: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        for ip_range in CLOUDFLARE_IPS:
+            if ip_obj in ipaddress.ip_network(ip_range):
+                return True
+    except ValueError:
+        return False
+    return False
+
+@app.middleware("http")
+async def cloudflare_protection_middleware(request: Request, call_next):
+    client_host = request.client.host
+    if not is_cloudflare_ip(client_host):
+        raise HTTPException(status_code=403, detail="Forbidden: Access is restricted.")
+
+    response = await call_next(request)
+    return response
+
+# Health check root route
+@app.get("/")
+def health():
+    return {"message": "Backend running ✅", "status": "healthy"}
 
 # Session-based CAPTCHA store
 captcha_sessions = {}
@@ -88,7 +122,7 @@ def get_captcha():
         # Step 3: Extract CAPTCHA URL from the new page content
         captcha_img_tag = soup_post.find("img", src=lambda x: x and "r=site%2Fcaptcha" in x)
         if not captcha_img_tag:
-             raise HTTPException(status_code=500, detail="CAPTCHA image not found after trigger.")
+            raise HTTPException(status_code=500, detail="CAPTCHA image not found after trigger.")
 
         captcha_url = base_url + captcha_img_tag["src"].replace("&amp;", "&")
         logger.info(f"Fetching CAPTCHA from: {captcha_url}")
@@ -237,7 +271,7 @@ def fetch_attendance(
         attendance_soup = BeautifulSoup(attendance_response.text, "html.parser")
         container = attendance_soup.find("div", class_="grid-view")
         if not container:
-             raise HTTPException(status_code=404, detail="Could not find the attendance data container on the page.")
+            raise HTTPException(status_code=404, detail="Could not find the attendance data container on the page.")
 
         table = container.find("table")
         if not table:
@@ -253,7 +287,7 @@ def fetch_attendance(
             attendance_data.append(row_data)
 
         if not attendance_data:
-             return {"success": True, "message": "No attendance data found for the selected period.", "attendance": []}
+            return {"success": True, "message": "No attendance data found for the selected period.", "attendance": []}
 
         return {"success": True, "attendance": attendance_data}
 
