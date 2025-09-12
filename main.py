@@ -35,7 +35,7 @@ async def host_protection_middleware(request: Request, call_next):
     host_header = request.headers.get("host", "").lower()
     
     # Allow requests only if the Host header is our Cloudflare URL
-    if host_header == "api.timetableklapi.me":
+    if host_header == "timetablekl.vercel.app":
         return await call_next(request)
     
     # Block all other requests
