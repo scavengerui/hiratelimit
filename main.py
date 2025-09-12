@@ -9,7 +9,6 @@ import os
 import secrets
 from datetime import datetime, timedelta
 import ipaddress
-from typing import List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,13 +21,13 @@ async def startup_event():
     logger.info("✅ FastAPI app starting...")
     logger.info(f"Environment: PORT={os.getenv('PORT', '8000')}")
 
-# Allow API access from any frontend (e.g., Expo app)
+# Allow API access from any frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Session-ID"], # Expose the custom header
+    expose_headers=["X-Session-ID"],  # Expose the custom header
 )
 
 # ------------------ CLOUDFLARE IP PROTECTION ------------------
@@ -55,51 +54,47 @@ def is_cloudflare_ip(ip: str) -> bool:
 
 @app.middleware("http")
 async def cloudflare_protection_middleware(request: Request, call_next):
-    client_host = None
+    # ✅ Allow requests coming via your Cloudflare domain
+    host_header = request.headers.get("host", "").lower()
+    if host_header == "api.timetableklapi.me":
+        logger.info(f"Accepted request via Cloudflare domain: {host_header}")
+        return await call_next(request)
 
-    # Get IP from standard headers first
-    x_forwarded_for = request.headers.get("X-Forwarded-For")
-    if x_forwarded_for:
-        client_host = x_forwarded_for.split(",")[0].strip()
+    # Otherwise apply IP restriction
+    client_host = request.headers.get("CF-Connecting-IP")
 
-    # Fallback to the CF-Connecting-IP header
     if not client_host:
-        cf_connecting_ip = request.headers.get("CF-Connecting-IP")
-        if cf_connecting_ip:
-            client_host = cf_connecting_ip.strip()
+        x_forwarded_for = request.headers.get("X-Forwarded-For")
+        if x_forwarded_for:
+            client_host = x_forwarded_for.split(",")[0].strip()
 
-    # Final fallback to standard client host
     if not client_host and request.client and request.client.host:
         client_host = request.client.host
 
-    # Block if not Cloudflare IP
     if client_host and not is_cloudflare_ip(client_host):
-        logger.warning(f"Blocked request from non-Cloudflare IP: {client_host}")
+        logger.warning(f"Blocked request from non-Cloudflare IP: {client_host}, Host: {host_header}")
         return JSONResponse(
             status_code=403,
             content={"detail": f"Forbidden: Access is restricted for IP {client_host}"}
         )
 
-    # If no IP found at all
     if not client_host:
-        logger.warning("Blocked request with no client IP detected.")
+        logger.warning(f"Blocked request with no client IP detected. Host: {host_header}")
         return JSONResponse(
             status_code=403,
             content={"detail": "Forbidden: No client IP found."}
         )
 
-    response = await call_next(request)
-    return response
+    return await call_next(request)
 
-# ------------------ HEALTH CHECK ------------------
+# ------------------ HEALTH ROUTE ------------------
 @app.get("/")
 def health():
     return {"message": "Backend running ✅", "status": "healthy"}
 
-# Session-based CAPTCHA store
+# ------------------ CAPTCHA STORE ------------------
 captcha_sessions = {}
 
-# Clean up expired sessions (older than 10 minutes)
 def cleanup_expired_sessions():
     try:
         current_time = datetime.now()
@@ -107,10 +102,8 @@ def cleanup_expired_sessions():
         for session_id, data in captcha_sessions.items():
             if current_time - data["created_at"] > timedelta(minutes=10):
                 expired_sessions.append(session_id)
-        
         for session_id in expired_sessions:
             del captcha_sessions[session_id]
-        
         if expired_sessions:
             logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
     except Exception as e:
@@ -126,7 +119,6 @@ def get_captcha():
         login_url = f"{base_url}/index.php?r=site%2Flogin"
         headers = {"User-Agent": "Mozilla/5.0"}
 
-        # Step 1: Get initial page and CSRF token
         logger.info("Fetching login page and CSRF token...")
         res = session.get(login_url, headers=headers, timeout=30)
         res.raise_for_status()
@@ -136,14 +128,12 @@ def get_captcha():
             raise HTTPException(status_code=500, detail="Failed to get CSRF token")
         csrf = csrf_meta["content"]
 
-        # Step 2: Trigger CAPTCHA with a dummy POST request
         logger.info("Triggering CAPTCHA with a dummy request...")
         dummy_data = {"_csrf": csrf, "LoginForm[username]": "", "LoginForm[password]": ""}
         res_post = session.post(login_url, data=dummy_data, headers=headers, timeout=30)
         res_post.raise_for_status()
         soup_post = BeautifulSoup(res_post.text, "html.parser")
 
-        # Step 3: Extract CAPTCHA URL
         captcha_img_tag = soup_post.find("img", src=lambda x: x and "r=site%2Fcaptcha" in x)
         if not captcha_img_tag:
             raise HTTPException(status_code=500, detail="CAPTCHA image not found after trigger.")
@@ -153,7 +143,6 @@ def get_captcha():
         captcha_response = session.get(captcha_url, timeout=30)
         captcha_response.raise_for_status()
 
-        # Step 4: Create and store session
         session_id = secrets.token_urlsafe(16)
         captcha_sessions[session_id] = {
             "session": session,
@@ -162,7 +151,6 @@ def get_captcha():
         }
         logger.info(f"Session created with ID: {session_id[:8]}...")
 
-        # Step 5: Return CAPTCHA image with session ID in header
         response = StreamingResponse(BytesIO(captcha_response.content), media_type="image/jpeg")
         response.headers["X-Session-ID"] = session_id
         return response
@@ -174,7 +162,7 @@ def get_captcha():
         logger.error(f"Unexpected error in get_captcha: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ------------------ LOGIN + FETCH TIMETABLE ------------------
+# ------------------ FETCH TIMETABLE ------------------
 @app.post("/fetch-timetable")
 def fetch_timetable(
     username: str = Form(...),
@@ -238,89 +226,3 @@ def fetch_timetable(
     finally:
         if session_id in captcha_sessions:
             del captcha_sessions[session_id]
-
-# ------------------ FETCH ATTENDANCE ------------------
-@app.post("/fetch-attendance")
-def fetch_attendance(
-    username: str = Form(...),
-    password: str = Form(...),
-    captcha: str = Form(...),
-    session_id: str = Form(...),
-    academic_year_code: str = Form(...),
-    semester_id: str = Form(...),
-):
-    if session_id not in captcha_sessions:
-        raise HTTPException(status_code=400, detail="Invalid or expired session. Please refresh and try again.")
-
-    session_data = captcha_sessions[session_id]
-    session = session_data["session"]
-    csrf = session_data["csrf"]
-    base_url = "https://newerp.kluniversity.in"
-    login_url = f"{base_url}/index.php?r=site%2Flogin"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        login_payload = {
-            "_csrf": csrf,
-            "LoginForm[username]": username,
-            "LoginForm[password]": password,
-            "LoginForm[captcha]": captcha,
-        }
-        login_response = session.post(login_url, data=login_payload, headers=headers, timeout=30)
-        login_response.raise_for_status()
-
-        if "Logout" not in login_response.text:
-            raise HTTPException(status_code=400, detail="Invalid credentials or captcha")
-
-        logger.info(f"Login successful for user: {username}")
-
-        attendance_url = f"{base_url}/index.php?r=studentattendance%2Fstudentdailyattendance%2Fcourselist"
-        post_login_soup = BeautifulSoup(login_response.text, "html.parser")
-        post_login_csrf_meta = post_login_soup.find("meta", {"name": "csrf-token"})
-        if not post_login_csrf_meta:
-            raise HTTPException(status_code=500, detail="Could not find CSRF token on post-login page.")
-        post_login_csrf = post_login_csrf_meta["content"]
-
-        attendance_payload = {
-            "_csrf": post_login_csrf,
-            "DynamicModel[academicyear]": academic_year_code,
-            "DynamicModel[semesterid]": semester_id,
-        }
-        attendance_response = session.post(attendance_url, data=attendance_payload, headers=headers, timeout=30)
-        attendance_response.raise_for_status()
-        
-        attendance_soup = BeautifulSoup(attendance_response.text, "html.parser")
-        container = attendance_soup.find("div", class_="grid-view")
-        if not container:
-            raise HTTPException(status_code=404, detail="Could not find the attendance data container on the page.")
-
-        table = container.find("table")
-        if not table:
-            raise HTTPException(status_code=404, detail="Could not find the attendance table within the container.")
-
-        table_headers = [th.text.strip() for th in table.find("thead").find_all("th")]
-        attendance_data = []
-        for row in table.find("tbody").find_all("tr"):
-            cells = row.find_all("td")
-            if not cells:
-                continue
-            row_data = {table_headers[i]: cells[i].text.strip() for i in range(len(cells))}
-            attendance_data.append(row_data)
-
-        if not attendance_data:
-            return {"success": True, "message": "No attendance data found for the selected period.", "attendance": []}
-
-        return {"success": True, "attendance": attendance_data}
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error during attendance fetch: {e}")
-        raise HTTPException(status_code=500, detail="A network error occurred.")
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An internal server error occurred.")
-    finally:
-        if session_id in captcha_sessions:
-            del captcha_sessions[session_id]
-            logger.info(f"Session {session_id[:8]}... cleaned up.")
