@@ -18,7 +18,7 @@ app = FastAPI(title="TimeTable & Attendance Backend", version="3.0.0")
 @app.on_event("startup")
 async def startup_event():
     logger.info("✅ FastAPI app starting...")
-    logger.info(f"Environment: PORT={os.getenv('PORT', '8000')}")
+    logger.info(f"Environment: PORT={os.getenv('PORT', '8080')}")
 
 # ------------------ CORS ------------------
 app.add_middleware(
@@ -28,18 +28,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Session-ID"], # Expose the custom header
 )
-
-# ------------------ HOST-BASED PROTECTION ------------------
-@app.middleware("http")
-async def host_protection_middleware(request: Request, call_next):
-    host_header = request.headers.get("host", "").lower()
-    
-    # Allow requests only if the Host header is our Cloudflare URL
-    if host_header == "timetablekl.vercel.app":
-        return await call_next(request)
-    
-    # Block all other requests
-    raise HTTPException(status_code=403, detail="Forbidden: Access is restricted to the Cloudflare domain.")
 
 # ------------------ HEALTH ------------------
 @app.get("/")
