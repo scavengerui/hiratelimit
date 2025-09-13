@@ -8,11 +8,10 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
-import ipaddress
 
 # ------------------ LOGGING ------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(_name_)
 
 app = FastAPI(title="TimeTable & Attendance Backend", version="3.0.0")
 
@@ -29,56 +28,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Session-ID"], # Expose the custom header
 )
-
-# ------------------ CLOUDFLARE IP RANGES ------------------
-CF_IPV4 = [
-    "173.245.48.0/20",
-    "103.21.244.0/22",
-    "103.22.200.0/22",
-    "103.31.4.0/22",
-    "141.101.64.0/18",
-    "108.162.192.0/18",
-    "190.93.240.0/20",
-    "188.114.96.0/20",
-    "197.234.240.0/22",
-    "198.41.128.0/17",
-    "162.158.0.0/15",
-    "104.16.0.0/13",
-    "104.24.0.0/14",
-    "172.64.0.0/13",
-    "131.0.72.0/22",
-]
-
-CF_IPV6 = [
-    "2400:cb00::/32",
-    "2606:4700::/32",
-    "2803:f800::/32",
-    "2405:b500::/32",
-    "2405:8100::/32",
-    "2a06:98c0::/29",
-    "2c0f:f248::/32",
-]
-
-cf_networks = [ipaddress.ip_network(cidr) for cidr in CF_IPV4 + CF_IPV6]
-
-@app.middleware("http")
-async def cloudflare_only(request: Request, call_next):
-    client_ip = request.client.host
-    try:
-        ip_obj = ipaddress.ip_address(client_ip)
-        allowed = any(ip_obj in net for net in cf_networks)
-    except ValueError:
-        allowed = False
-
-    if not allowed:
-        logger.warning(f"❌ Blocked request from {client_ip} (not Cloudflare)")
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    # (Optional) Log real visitor IP from header
-    cf_ip = request.headers.get("CF-Connecting-IP", client_ip)
-    logger.info(f"✅ Allowed request via Cloudflare. Real visitor IP: {cf_ip}")
-
-    return await call_next(request)
 
 # ------------------ HEALTH ------------------
 @app.get("/")
