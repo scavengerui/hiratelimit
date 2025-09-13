@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException, Request, Depends
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from bs4 import BeautifulSoup
@@ -8,7 +8,7 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
-from ipaddress import ip_address, ip_network
+import ipaddress
 
 # ------------------ LOGGING ------------------
 logging.basicConfig(level=logging.INFO)
@@ -27,11 +27,11 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Session-ID"],  # Expose the custom header
+    expose_headers=["X-Session-ID"], # Expose the custom header
 )
 
-# ------------------ ALLOWED CLOUDFLARE IP RANGES ------------------
-ALLOWED_IPV4 = [
+# ------------------ CLOUDFLARE IP RANGES ------------------
+CF_IPV4 = [
     "173.245.48.0/20",
     "103.21.244.0/22",
     "103.22.200.0/22",
@@ -48,7 +48,8 @@ ALLOWED_IPV4 = [
     "172.64.0.0/13",
     "131.0.72.0/22",
 ]
-ALLOWED_IPV6 = [
+
+CF_IPV6 = [
     "2400:cb00::/32",
     "2606:4700::/32",
     "2803:f800::/32",
@@ -58,19 +59,29 @@ ALLOWED_IPV6 = [
     "2c0f:f248::/32",
 ]
 
-allowed_networks = [ip_network(cidr) for cidr in ALLOWED_IPV4 + ALLOWED_IPV6]
+cf_networks = [ipaddress.ip_network(cidr) for cidr in CF_IPV4 + CF_IPV6]
 
-def verify_cloudflare_ip(request: Request):
+@app.middleware("http")
+async def cloudflare_only(request: Request, call_next):
     client_ip = request.client.host
-    ip_obj = ip_address(client_ip)
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+        allowed = any(ip_obj in net for net in cf_networks)
+    except ValueError:
+        allowed = False
 
-    if not any(ip_obj in net for net in allowed_networks):
-        logger.warning(f"❌ Blocked request from IP: {client_ip}")
-        raise HTTPException(status_code=403, detail="Access forbidden: IP not allowed")
-    logger.info(f"✅ Allowed request from Cloudflare IP: {client_ip}")
+    if not allowed:
+        logger.warning(f"❌ Blocked request from {client_ip} (not Cloudflare)")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # (Optional) Log real visitor IP from header
+    cf_ip = request.headers.get("CF-Connecting-IP", client_ip)
+    logger.info(f"✅ Allowed request via Cloudflare. Real visitor IP: {cf_ip}")
+
+    return await call_next(request)
 
 # ------------------ HEALTH ------------------
-@app.get("/", dependencies=[Depends(verify_cloudflare_ip)])
+@app.get("/")
 def health():
     return {"message": "Backend running ✅", "status": "healthy"}
 
@@ -84,17 +95,17 @@ def cleanup_expired_sessions():
         for session_id, data in captcha_sessions.items():
             if current_time - data["created_at"] > timedelta(minutes=10):
                 expired_sessions.append(session_id)
-
+        
         for session_id in expired_sessions:
             del captcha_sessions[session_id]
-
+        
         if expired_sessions:
             logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
     except Exception as e:
         logger.error(f"Error cleaning up sessions: {e}")
 
 # ------------------ CAPTCHA ROUTE ------------------
-@app.get("/get-captcha", dependencies=[Depends(verify_cloudflare_ip)])
+@app.get("/get-captcha")
 def get_captcha():
     cleanup_expired_sessions()
     try:
@@ -147,7 +158,7 @@ def get_captcha():
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # ------------------ FETCH TIMETABLE ------------------
-@app.post("/fetch-timetable", dependencies=[Depends(verify_cloudflare_ip)])
+@app.post("/fetch-timetable")
 def fetch_timetable(
     username: str = Form(...),
     password: str = Form(...),
@@ -204,7 +215,7 @@ def fetch_timetable(
             del captcha_sessions[session_id]
 
 # ------------------ FETCH ATTENDANCE ------------------
-@app.post("/fetch-attendance", dependencies=[Depends(verify_cloudflare_ip)])
+@app.post("/fetch-attendance")
 def fetch_attendance(
     username: str = Form(...),
     password: str = Form(...),
